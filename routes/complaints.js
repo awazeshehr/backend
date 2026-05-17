@@ -50,7 +50,116 @@ function escapeRegExp(input) {
   return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const GEOCODE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const GEOCODE_CACHE_MAX = 600;
+const geocodeCache = new Map();
+
+function cacheGet(key) {
+  const entry = geocodeCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > GEOCODE_CACHE_TTL_MS) {
+    geocodeCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function cacheSet(key, value) {
+  geocodeCache.set(key, { ts: Date.now(), value });
+  if (geocodeCache.size <= GEOCODE_CACHE_MAX) return;
+  const oldestKey = geocodeCache.keys().next().value;
+  if (oldestKey) geocodeCache.delete(oldestKey);
+}
+
+function normalizeQuery(q) {
+  return String(q || '').trim().replace(/\s+/g, ' ');
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 4500) {
+  if (typeof fetch !== 'function') {
+    const e = new Error('fetch is not available in this Node runtime');
+    e.statusCode = 500;
+    throw e;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'AwazEShehrServer/1.0 (contact: support@awaz-e-shehr.local)'
+      },
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const e = new Error(`Geocode request failed: ${res.status}`);
+      e.statusCode = res.status;
+      throw e;
+    }
+    return res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // ✅ CITIZEN ROUTES
+
+router.get('/geocode/search', auth, async (req, res) => {
+  try {
+    const q = normalizeQuery(req.query.q);
+    const limit = Math.max(1, Math.min(5, Number(req.query.limit) || 1));
+    if (!q || q.length < 3) {
+      return res.status(400).json({ success: false, message: 'Query is required' });
+    }
+
+    const cacheKey = `search:${limit}:${q.toLowerCase()}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ success: true, results: cached, cached: true });
+
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=${limit}&addressdetails=1&countrycodes=pk&q=${encodeURIComponent(q)}`;
+    const data = await fetchJsonWithTimeout(url, 4500);
+    const results = Array.isArray(data)
+      ? data
+          .map(r => ({
+            lat: r?.lat ? Number(r.lat) : null,
+            lng: r?.lon ? Number(r.lon) : null,
+            address: r?.display_name ? String(r.display_name) : ''
+          }))
+          .filter(r => Number.isFinite(r.lat) && Number.isFinite(r.lng))
+      : [];
+
+    cacheSet(cacheKey, results);
+    res.json({ success: true, results });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to search location' });
+  }
+});
+
+router.get('/geocode/reverse', auth, async (req, res) => {
+  try {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.status(400).json({ success: false, message: 'lat and lng are required' });
+    }
+
+    const latKey = lat.toFixed(5);
+    const lngKey = lng.toFixed(5);
+    const cacheKey = `reverse:${latKey}:${lngKey}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ success: true, address: cached, cached: true });
+
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&addressdetails=1&lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lng))}`;
+    const data = await fetchJsonWithTimeout(url, 4500);
+    const address = data?.display_name ? String(data.display_name) : '';
+
+    cacheSet(cacheKey, address);
+    res.json({ success: true, address });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to reverse geocode' });
+  }
+});
 
 // Get Urban Sectors
 router.get('/data/sectors', auth, async (req, res) => {
@@ -85,7 +194,7 @@ router.get('/data/departments', auth, async (req, res) => {
 // Submit new complaint - GUARANTEED WORKING VERSION
 router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), async (req, res) => {
   try {
-    const { description, departmentId, service } = req.body;
+    const { description, departmentId, service, isEmergency } = req.body;
     let { location } = req.body;
 
     console.log('📝 Submitting professional complaint for user:', req.user._id);
@@ -120,10 +229,17 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
 
     const cleanedText = String(description || '').trim();
     const classification = await classifyComplaint(cleanedText);
-    const resolvedCategory = classification.category;
-    const finalPriority = classification.priority;
-    const priorityColor = classification.priority_color;
-    const modelConfidence = classification.confidence;
+    let resolvedCategory = classification.category;
+    let finalPriority = classification.priority;
+    let priorityColor = classification.priority_color;
+    let modelConfidence = classification.confidence;
+
+    // Force emergency handling if flag is present
+    if (isEmergency === 'true' || isEmergency === true) {
+      finalPriority = 'critical';
+      priorityColor = '#c53030';
+      resolvedCategory = 'Emergency/Urgent';
+    }
 
     let resolvedDepartmentName = '';
     let resolvedDepartmentId = departmentId;
@@ -236,7 +352,8 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
     await complaint.save();
     console.log('✅ Complaint saved successfully');
 
-    // Attempt auto-routing to officer
+    // Attempt auto-routing to officer - DISABLED per user request for manual Dept Admin assignment
+    /*
     try {
       const assignmentService = require('../services/assignmentService');
       const routeResult = await assignmentService.routeComplaint(complaint);
@@ -256,6 +373,7 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
     } catch (e) {
       console.error('Auto-routing failed:', e);
     }
+    */
 
     // Create notification
     const notification = new Notification({
@@ -361,6 +479,67 @@ router.post('/:id/citizen-evidence', auth, authorize('citizen'), upload.array('e
       success: false,
       message: 'Server error while adding evidence'
     });
+  }
+});
+
+// Get public complaints (for community feed and map)
+router.get('/public', auth, async (req, res) => {
+  try {
+    const complaints = await Complaint.find({ 
+      status: { $in: ['pending', 'in-progress', 'assigned', 'resolved'] }
+    })
+    .sort({ createdAt: -1 })
+    .limit(50)
+    .select('complaintId category description status priority location createdAt');
+
+    res.json({
+      success: true,
+      complaints
+    });
+  } catch (error) {
+    console.error('Get public complaints error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching public complaints'
+    });
+  }
+});
+
+router.get('/track/:complaintId', async (req, res) => {
+  try {
+    const raw = String(req.params.complaintId || '').trim();
+    const normalized = raw.replace(/^#/, '').trim();
+    if (!normalized) {
+      return res.status(400).json({ success: false, message: 'Complaint ID is required' });
+    }
+
+    const complaint = await Complaint.findOne({
+      complaintId: { $regex: new RegExp(`^${escapeRegExp(normalized)}$`, 'i') }
+    })
+      .select('complaintId status category department service createdAt updatedAt assignedDate resolvedAt location');
+
+    if (!complaint) {
+      return res.status(404).json({ success: false, message: 'Complaint not found' });
+    }
+
+    res.json({
+      success: true,
+      complaint: {
+        complaintId: complaint.complaintId,
+        status: complaint.status,
+        category: complaint.category,
+        department: complaint.department,
+        service: complaint.service,
+        createdAt: complaint.createdAt,
+        updatedAt: complaint.updatedAt,
+        assignedDate: complaint.assignedDate,
+        resolvedAt: complaint.resolvedAt,
+        location: complaint.location ? { address: complaint.location.address } : undefined
+      }
+    });
+  } catch (error) {
+    console.error('Track complaint error:', error);
+    res.status(500).json({ success: false, message: 'Server error while tracking complaint' });
   }
 });
 
@@ -670,6 +849,8 @@ router.post('/:id/evidence', auth, authorize('field-officer'), upload.array('evi
     // Create notification for citizen
     const notification = new Notification({
       userId: complaint.userId,
+      recipient: complaint.userId,
+      recipientModel: 'User',
       title: 'Evidence Added to Your Complaint',
       message: `Field officer has added evidence to your complaint ${complaint.complaintId}.`,
       type: 'info',
