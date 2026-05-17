@@ -187,6 +187,8 @@ io.on('connection', (socket) => {
         if (recipientId) {
           await Notification.create({
             userId: recipientId,
+            recipient: recipientId,
+            recipientModel: role === 'field-officer' ? 'User' : 'FieldOfficer',
             title: 'New Complaint Message',
             message: `New message on complaint ${complaintId}.`,
             type: 'info',
@@ -229,19 +231,44 @@ io.on('connection', (socket) => {
     try {
       if (!recipientId || !text) return;
       const senderRole = socket.user.role;
+      const DepartmentAdmin = require('./models/DepartmentAdmin');
+      const FieldOfficer = require('./models/FieldOfficer');
+
       let recipientRole = null;
-      try {
-        const DepartmentAdmin = require('./models/DepartmentAdmin');
-        const FieldOfficer = require('./models/FieldOfficer');
-        const dep = await DepartmentAdmin.findById(recipientId).select('_id');
-        if (dep) recipientRole = 'dept-admin';
-        if (!recipientRole) {
-          const fo = await FieldOfficer.findById(recipientId).select('_id');
-          if (fo) recipientRole = 'field-officer';
+      let senderDepartment = null;
+      let recipientDepartment = null;
+
+      const [recipientAdmin, recipientOfficer] = await Promise.all([
+        DepartmentAdmin.findById(recipientId).select('department').lean(),
+        FieldOfficer.findById(recipientId).select('department').lean()
+      ]);
+
+      if (recipientAdmin) {
+        recipientRole = 'dept-admin';
+        recipientDepartment = recipientAdmin.department || null;
+      } else if (recipientOfficer) {
+        recipientRole = 'field-officer';
+        recipientDepartment = recipientOfficer.department || null;
+      }
+
+      if (senderRole === 'dept-admin') {
+        const senderAdmin = await DepartmentAdmin.findById(socket.user.userId).select('department').lean();
+        senderDepartment = senderAdmin?.department || null;
+      } else if (senderRole === 'field-officer') {
+        const senderOfficer = await FieldOfficer.findById(socket.user.userId).select('department').lean();
+        senderDepartment = senderOfficer?.department || null;
+      }
+
+      const isDeptAdminToOfficer =
+        (senderRole === 'dept-admin' && recipientRole === 'field-officer') ||
+        (senderRole === 'field-officer' && recipientRole === 'dept-admin');
+
+      if (isDeptAdminToOfficer) {
+        const sameDepartment =
+          String(senderDepartment || '').trim().toLowerCase() === String(recipientDepartment || '').trim().toLowerCase();
+        if (!sameDepartment) {
+          return socket.emit('errorMessage', 'Cannot message outside your department');
         }
-      } catch (e) {}
-      if ((senderRole === 'dept-admin' && recipientRole === 'field-officer') || (senderRole === 'field-officer' && recipientRole === 'dept-admin')) {
-        return socket.emit('errorMessage', 'Direct chat between field officers and department admins is disabled');
       }
       
       const message = await Message.create({
@@ -330,6 +357,8 @@ server.listen(PORT, () => {
           if (pastReminder || pastDue) {
             await Notification.create({
               userId: c.userId,
+              recipient: c.userId,
+              recipientModel: 'User',
               title: 'Reminder: Complaint Pending',
               message: `Your complaint ${c.complaintId} is pending${pastDue ? ' and past due' : ''}.`,
               type: 'info',
