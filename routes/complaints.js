@@ -3,6 +3,7 @@ const Complaint = require('../models/Complaint');
 const Notification = require('../models/Notification');
 const Department = require('../models/Department');
 const FieldOfficer = require('../models/FieldOfficer');
+const DepartmentAdmin = require('../models/DepartmentAdmin');
 const UrbanSector = require('../models/UrbanSector');
 const RuralJurisdiction = require('../models/RuralJurisdiction');
 const auth = require('../middleware/auth');
@@ -909,6 +910,25 @@ router.post('/:id/feedback', auth, authorize('citizen'), async (req, res) => {
         relatedId: complaint._id
       });
       await notif.save();
+    }
+
+    // Notify Department Admin(s)
+    try {
+      const deptAdmins = await DepartmentAdmin.find({ department: complaint.department });
+      for (const admin of deptAdmins) {
+        const adminNotif = new Notification({
+          recipient: admin._id,
+          recipientModel: 'DepartmentAdmin',
+          title: 'New Citizen Feedback',
+          message: `Citizen provided feedback for complaint ${complaint.complaintId} (Rating: ${rating}).`,
+          type: rating <= 2 ? 'warning' : 'info',
+          relatedTo: 'complaint',
+          relatedId: complaint._id
+        });
+        await adminNotif.save();
+      }
+    } catch (e) {
+      console.error('Error notifying dept admins about feedback:', e);
     }
 
     res.json({ success: true, message: 'Feedback submitted', feedback: complaint.feedback });
