@@ -37,16 +37,6 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024, files: 5 }
 });
 
-// Department codes mapping
-const DEPARTMENT_CODES = {
-  'water': 'WTR',
-  'electricity': 'ELEC',
-  'sanitation': 'SAN',
-  'roads': 'ROAD',
-  'waste': 'WASTE',
-  'other': 'GEN'
-};
-
 function escapeRegExp(input) {
   return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
