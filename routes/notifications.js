@@ -41,6 +41,7 @@ router.get('/', auth, async (req, res) => {
         icon: getNotificationIcon(notif.type),
         isRead: notif.isRead,
         timestamp: notif.createdAt,
+        createdAt: notif.createdAt,
         relatedTo: notif.relatedTo,
         relatedId: notif.relatedId
       }))
