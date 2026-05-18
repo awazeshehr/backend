@@ -908,8 +908,17 @@ router.post('/:id/feedback', auth, authorize('citizen'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Feedback already submitted' });
     }
 
-    const sentiment = await analyzeFeedbackSentiment(comment);
-    await complaint.setFeedback(Number(rating), comment, req.user._id, sentiment.sentiment, sentiment.compound_score);
+    const numericRating = Number(rating);
+    const cleanComment = String(comment || '').trim();
+    let sentiment;
+    if (!cleanComment) {
+      const derived = numericRating >= 4 ? 'positive' : numericRating <= 2 ? 'negative' : 'neutral';
+      const derivedScore = numericRating >= 4 ? 0.6 : numericRating <= 2 ? -0.6 : 0;
+      sentiment = { sentiment: derived, compound_score: derivedScore, source: 'rating' };
+    } else {
+      sentiment = await analyzeFeedbackSentiment(cleanComment);
+    }
+    await complaint.setFeedback(numericRating, cleanComment, req.user._id, sentiment.sentiment, sentiment.compound_score);
 
     // Notify assigned officer (if any)
     if (complaint.assignedTo) {
