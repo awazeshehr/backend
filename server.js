@@ -117,8 +117,13 @@ io.on('connection', (socket) => {
     try {
       if (!complaintId) return;
       const effectiveTemplate = templateKey && String(templateKey).trim() ? String(templateKey).trim() : 'custom_message';
-      const complaint = await Complaint.findById(complaintId).select('userId assignedTo category assignedDate');
+      const complaint = await Complaint.findById(complaintId).select('userId assignedTo category assignedDate status');
       if (!complaint) return;
+      const s = String(complaint.status || '').toLowerCase();
+      if (s === 'resolved' || s === 'completed') {
+        socket.emit('errorMessage', 'Chat closed');
+        return;
+      }
       const role = socket.user.role;
       const allowed = MESSAGE_TEMPLATES[role];
       if (!allowed || allowed[effectiveTemplate] === undefined) return;
