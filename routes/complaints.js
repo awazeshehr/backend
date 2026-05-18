@@ -234,18 +234,32 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
 
     let resolvedDepartmentName = '';
     let resolvedDepartmentId = departmentId;
-    try {
-      const categoryKey = String(resolvedCategory || '').trim().toLowerCase();
-      const mapping = await CategoryDepartmentMapping.findOne({ $or: [{ categoryKey }, { categoryName: String(resolvedCategory || '').trim() }] })
-        .populate('departmentId', 'name');
-      if (mapping?.departmentId?._id) {
-        resolvedDepartmentId = mapping.departmentId._id;
-        resolvedDepartmentName = mapping.departmentId.name;
-      } else if (resolvedDepartmentId) {
-        const dep = await Department.findById(resolvedDepartmentId).select('name');
-        if (dep) resolvedDepartmentName = dep.name;
+    let explicitDepartmentDoc = null;
+    if (resolvedDepartmentId) {
+      try {
+        explicitDepartmentDoc = await Department.findById(resolvedDepartmentId).select('_id name isActive');
+        if (!explicitDepartmentDoc) {
+          return res.status(400).json({ success: false, message: 'Invalid department selected' });
+        }
+        if (explicitDepartmentDoc.isActive === false) {
+          return res.status(400).json({ success: false, message: 'Selected department is not active' });
+        }
+        resolvedDepartmentName = explicitDepartmentDoc.name;
+        resolvedDepartmentId = explicitDepartmentDoc._id;
+      } catch (e) {
+        return res.status(400).json({ success: false, message: 'Invalid department selected' });
       }
-    } catch (e) {}
+    } else {
+      try {
+        const categoryKey = String(resolvedCategory || '').trim().toLowerCase();
+        const mapping = await CategoryDepartmentMapping.findOne({ $or: [{ categoryKey }, { categoryName: String(resolvedCategory || '').trim() }] })
+          .populate('departmentId', 'name');
+        if (mapping?.departmentId?._id) {
+          resolvedDepartmentId = mapping.departmentId._id;
+          resolvedDepartmentName = mapping.departmentId.name;
+        }
+      } catch (e) {}
+    }
     if (!resolvedDepartmentId) {
       try {
         const dep = await Department.findOne({ isActive: true }).sort({ createdAt: 1 }).select('name');
@@ -256,13 +270,18 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
       } catch (e) {}
     }
 
+    const normalizedService = String(service || '').trim();
+    const finalCategory = explicitDepartmentDoc
+      ? (normalizedService && normalizedService.toLowerCase() !== 'general' ? normalizedService : (explicitDepartmentDoc.name || resolvedCategory))
+      : resolvedCategory;
+
     // Check for duplicate complaints (Same category + Nearby location + Active status)
     const lat = parseFloat(location.lat);
     const lng = parseFloat(location.lng);
     const DUPLICATE_THRESHOLD = 0.0005; // Approx 50 meters
 
     const duplicateComplaint = await Complaint.findOne({
-      category: resolvedCategory,
+      category: finalCategory,
       status: { $in: ['pending', 'in-progress', 'assigned'] },
       'location.lat': { $gt: lat - DUPLICATE_THRESHOLD, $lt: lat + DUPLICATE_THRESHOLD },
       'location.lng': { $gt: lng - DUPLICATE_THRESHOLD, $lt: lng + DUPLICATE_THRESHOLD }
@@ -304,7 +323,7 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
     const complaintData = {
               complaintId: complaintId, // Explicitly set the ID
               userId: req.user._id,
-              category: resolvedCategory,
+              category: finalCategory,
               service, // Save the specific service selected
               departmentId: resolvedDepartmentId, // Save the department reference
               description: cleanedText,
@@ -338,7 +357,7 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
       by: req.user._id,
       byRole: req.user.role,
       at: new Date(),
-      meta: { category: resolvedCategory }
+      meta: { category: finalCategory }
     });
     await complaint.save();
     console.log('✅ Complaint saved successfully');
