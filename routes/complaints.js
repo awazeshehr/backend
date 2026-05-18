@@ -885,6 +885,10 @@ router.post('/:id/feedback', auth, authorize('citizen'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Feedback allowed only after resolution' });
     }
 
+    if (complaint.feedback && (complaint.feedback.rating != null || complaint.feedback.createdAt)) {
+      return res.status(400).json({ success: false, message: 'Feedback already submitted' });
+    }
+
     const sentiment = await analyzeFeedbackSentiment(comment);
     await complaint.setFeedback(Number(rating), comment, req.user._id, sentiment.sentiment, sentiment.compound_score);
 
