@@ -120,7 +120,7 @@ io.on('connection', (socket) => {
       const complaint = await Complaint.findById(complaintId).select('userId assignedTo category assignedDate status');
       if (!complaint) return;
       const s = String(complaint.status || '').toLowerCase();
-      if (s === 'resolved' || s === 'completed') {
+      if (s === 'completed') {
         socket.emit('errorMessage', 'Chat closed');
         return;
       }
