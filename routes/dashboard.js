@@ -99,7 +99,7 @@ router.get('/super-admin', auth, authorize('super-admin'), async (req, res) => {
   try {
     const complaints = await Complaint.find({});
     const feedbacks = complaints
-      .map(c => c.feedback)
+      .map(c => normalizeFeedbackForResponse(c.feedback))
       .filter(f => f && typeof f.sentiment === 'string' && typeof f.sentimentScore === 'number');
 
     const sentimentCounts = feedbacks.reduce((acc, f) => {
@@ -140,6 +140,24 @@ function escapeRegExp(input) {
   return String(input || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function normalizeFeedbackForResponse(feedback) {
+  if (!feedback) return null;
+
+  const rating = Number(feedback.rating);
+  const ratingMood = rating >= 4 ? 'positive' : rating <= 2 ? 'negative' : 'neutral';
+  const rawSentiment = String(feedback.sentiment || '').toLowerCase();
+  let sentiment = rawSentiment === 'positive' || rawSentiment === 'negative' || rawSentiment === 'neutral' ? rawSentiment : 'neutral';
+  let score = typeof feedback.sentimentScore === 'number' ? feedback.sentimentScore : 0;
+
+  if (ratingMood !== 'neutral') {
+    if (sentiment === 'neutral') sentiment = ratingMood;
+    if (ratingMood === 'negative' && score > -0.2) score = -0.6;
+    if (ratingMood === 'positive' && score < 0.2) score = 0.6;
+  }
+
+  return { ...feedback, sentiment, sentimentScore: score };
+}
+
 // Get complaints for department admin with filters
 router.get('/complaints/dept-admin', auth, authorize('dept-admin'), async (req, res) => {
   try {
@@ -166,7 +184,14 @@ router.get('/complaints/dept-admin', auth, authorize('dept-admin'), async (req, 
     }
     
     if (status && status !== 'all') {
-      filter.status = status;
+      if (status === 'unassigned') {
+        filter.$or = [
+          { assignedTo: { $exists: false } },
+          { assignedTo: null }
+        ];
+      } else {
+        filter.status = status;
+      }
     } else if (String(overdueOnly) === 'true') {
       filter.status = { $nin: ['resolved', 'completed'] };
     }
@@ -219,7 +244,7 @@ router.get('/complaints/dept-admin', auth, authorize('dept-admin'), async (req, 
         priorityColor: complaint.priorityColor || '',
         modelConfidence: typeof complaint.modelConfidence === 'number' ? complaint.modelConfidence : undefined,
         dueDate: complaint.dueDate,
-        feedback: complaint.feedback || null,
+        feedback: normalizeFeedbackForResponse(complaint.feedback),
         citizenName: complaint.userId?.fullName || 'N/A',
         contactNumber: complaint.userId?.phone || 'N/A',
         assignedTo: complaint.assignedTo ? {
@@ -922,7 +947,8 @@ router.put('/complaints/:id/verify', auth, authorize('dept-admin'), async (req, 
       
       // Create notification for the citizen
       const citizenNotification = new Notification({
-        userId: complaint.userId._id,
+        recipient: complaint.userId._id,
+        recipientModel: 'User',
         title: 'Complaint Resolved Successfully!',
         message: `Great news! Your complaint ${complaint.complaintId} has been successfully resolved and verified. Thank you for your patience.`,
         type: 'success',
@@ -935,7 +961,8 @@ router.put('/complaints/:id/verify', auth, authorize('dept-admin'), async (req, 
       // Create notification for the assigned officer
       if (complaint.assignedTo) {
         const officerNotification = new Notification({
-          userId: complaint.assignedTo._id,
+          recipient: complaint.assignedTo._id,
+          recipientModel: 'FieldOfficer',
           title: 'Complaint Completed Successfully!',
           message: `Excellent work! Your complaint ${complaint.complaintId} has been verified and completed by the department admin.`,
           type: 'success',
@@ -990,7 +1017,8 @@ router.put('/complaints/:id/verify', auth, authorize('dept-admin'), async (req, 
       // Create notification for the assigned officer
       if (complaint.assignedTo) {
         const officerNotification = new Notification({
-          userId: complaint.assignedTo._id,
+          recipient: complaint.assignedTo._id,
+          recipientModel: 'FieldOfficer',
           title: 'Complaint Requires Additional Work',
           message: `The complaint ${complaint.complaintId} has been rejected during verification. Please review and provide additional evidence or complete the work.`,
           type: 'warning',
