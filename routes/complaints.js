@@ -917,6 +917,20 @@ router.post('/:id/feedback', auth, authorize('citizen'), async (req, res) => {
       sentiment = { sentiment: derived, compound_score: derivedScore, source: 'rating' };
     } else {
       sentiment = await analyzeFeedbackSentiment(cleanComment);
+      const ratingMood = numericRating >= 4 ? 'positive' : numericRating <= 2 ? 'negative' : 'neutral';
+      if (ratingMood !== 'neutral') {
+        const s = String(sentiment?.sentiment || '').toLowerCase();
+        if (s !== 'positive' && s !== 'negative' && s !== 'neutral') {
+          sentiment.sentiment = ratingMood;
+        } else if (s === 'neutral') {
+          sentiment.sentiment = ratingMood;
+        }
+        if (ratingMood === 'negative') {
+          if (typeof sentiment.compound_score !== 'number' || sentiment.compound_score > -0.2) sentiment.compound_score = -0.6;
+        } else if (ratingMood === 'positive') {
+          if (typeof sentiment.compound_score !== 'number' || sentiment.compound_score < 0.2) sentiment.compound_score = 0.6;
+        }
+      }
     }
     await complaint.setFeedback(numericRating, cleanComment, req.user._id, sentiment.sentiment, sentiment.compound_score);
 
