@@ -6,6 +6,7 @@ const FieldOfficer = require('../models/FieldOfficer');
 const DepartmentAdmin = require('../models/DepartmentAdmin');
 const UrbanSector = require('../models/UrbanSector');
 const RuralJurisdiction = require('../models/RuralJurisdiction');
+const Subsector = require('../models/Subsector');
 const auth = require('../middleware/auth');
 const authorize = require('../middleware/authorize');
 const router = express.Router();
@@ -159,6 +160,17 @@ router.get('/data/sectors', auth, async (req, res) => {
     res.json({ success: true, sectors });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to fetch sectors' });
+  }
+});
+
+// Get Subsectors for a Sector
+router.get('/data/sectors/:sectorId/subsectors', auth, async (req, res) => {
+  try {
+    const { sectorId } = req.params;
+    const subsectors = await Subsector.find({ sectorId, status: { $ne: 'inactive' } }).sort({ name: 1 });
+    res.json({ success: true, subsectors });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to fetch subsectors' });
   }
 });
 
@@ -335,6 +347,8 @@ router.post('/submit', auth, authorize('citizen'), upload.array('media', 5), asy
                 city: 'islamabad',
                 areaType: location.areaType || 'Urban',
                 sector: location.sector || '',
+                subsector: location.subsector || '',
+                subsectorId: location.subsectorId || undefined,
                 ruralJurisdiction: location.ruralJurisdiction || ''
               },
               media: mediaFiles,

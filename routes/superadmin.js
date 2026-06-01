@@ -20,6 +20,8 @@ const mongoose = require('mongoose');
 const RoutingPolicy = require('../models/RoutingPolicy');
 const UrbanSector = require('../models/UrbanSector');
 const RuralJurisdiction = require('../models/RuralJurisdiction');
+const Subsector = require('../models/Subsector');
+const SubsectorJurisdictionMapping = require('../models/SubsectorJurisdictionMapping');
 const SystemPolicy = require('../models/SystemPolicy');
 const AuditLog = require('../models/AuditLog');
 
@@ -96,6 +98,107 @@ router.delete('/urban-sectors/:id', async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to delete sector' });
+  }
+});
+
+// Urban Subsectors
+router.get('/urban-sectors/:sectorId/subsectors', async (req, res) => {
+  try {
+    const { sectorId } = req.params;
+    const list = await Subsector.find({ sectorId }).sort({ name: 1 });
+    res.json({ success: true, subsectors: list });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to list subsectors' });
+  }
+});
+
+router.post('/subsectors', async (req, res) => {
+  try {
+    const { sectorId, name } = req.body || {};
+    if (!sectorId || !name) return res.status(400).json({ success: false, message: 'sectorId and name are required' });
+    const created = await Subsector.create({ sectorId, name: String(name).trim() });
+    audit(req, 'create', 'subsector', created._id, { sectorId, name });
+    res.status(201).json({ success: true, subsector: created });
+  } catch (e) {
+    if (e.code === 11000) return res.status(400).json({ success: false, message: 'Subsector already exists' });
+    res.status(500).json({ success: false, message: 'Failed to create subsector' });
+  }
+});
+
+router.post('/urban-sectors/:sectorId/subsectors/auto-generate', async (req, res) => {
+  try {
+    const { sectorId } = req.params;
+    const sector = await UrbanSector.findById(sectorId).select('name');
+    if (!sector) return res.status(404).json({ success: false, message: 'Sector not found' });
+    const base = String(sector.name || '').trim();
+    if (!base) return res.status(400).json({ success: false, message: 'Invalid sector name' });
+
+    const docs = [1, 2, 3, 4].map(n => ({ sectorId, name: `${base}/${n}` }));
+    await Subsector.insertMany(docs, { ordered: false });
+    const list = await Subsector.find({ sectorId }).sort({ name: 1 });
+    audit(req, 'auto-generate', 'subsector', sectorId, { base, count: 4 });
+    res.json({ success: true, subsectors: list });
+  } catch (e) {
+    if (e && (e.code === 11000 || e.writeErrors)) {
+      const { sectorId } = req.params;
+      const list = await Subsector.find({ sectorId }).sort({ name: 1 });
+      return res.json({ success: true, subsectors: list });
+    }
+    res.status(500).json({ success: false, message: 'Failed to auto-generate subsectors' });
+  }
+});
+
+router.put('/subsectors/:id', async (req, res) => {
+  try {
+    const { name, status } = req.body || {};
+    const update = {};
+    if (typeof name === 'string') update.name = String(name).trim();
+    if (typeof status === 'string') update.status = status;
+    update.updatedAt = new Date();
+    const subsector = await Subsector.findByIdAndUpdate(req.params.id, update, { new: true });
+    if (!subsector) return res.status(404).json({ success: false, message: 'Subsector not found' });
+    audit(req, 'update', 'subsector', subsector._id, update);
+    res.json({ success: true, subsector });
+  } catch (e) {
+    if (e.code === 11000) return res.status(400).json({ success: false, message: 'Subsector already exists' });
+    res.status(500).json({ success: false, message: 'Failed to update subsector' });
+  }
+});
+
+router.delete('/subsectors/:id', async (req, res) => {
+  try {
+    await Subsector.findByIdAndDelete(req.params.id);
+    await SubsectorJurisdictionMapping.findOneAndDelete({ subsectorId: req.params.id });
+    audit(req, 'delete', 'subsector', req.params.id, {});
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to delete subsector' });
+  }
+});
+
+// Subsector ↔ Department mapping
+router.get('/subsectors/:id/jurisdictions', async (req, res) => {
+  try {
+    const mapping = await SubsectorJurisdictionMapping.findOne({ subsectorId: req.params.id }).lean();
+    res.json({ success: true, mapping: mapping || { subsectorId: req.params.id, departmentIds: [] } });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to get mapping' });
+  }
+});
+
+router.put('/subsectors/:id/jurisdictions', async (req, res) => {
+  try {
+    const { departmentIds } = req.body || {};
+    const list = Array.isArray(departmentIds) ? departmentIds : [];
+    const mapping = await SubsectorJurisdictionMapping.findOneAndUpdate(
+      { subsectorId: req.params.id },
+      { subsectorId: req.params.id, departmentIds: list, updatedAt: new Date() },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+    audit(req, 'upsert', 'subsectorJurisdictionMapping', mapping._id, { subsectorId: req.params.id, departmentIds: list });
+    res.json({ success: true, mapping });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to save mapping' });
   }
 });
 

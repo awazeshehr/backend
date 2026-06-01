@@ -57,6 +57,8 @@ const complaintSchema = new mongoose.Schema({
     city: { type: String, default: 'islamabad' },
     areaType: { type: String, enum: ['Urban', 'Rural'], default: 'Urban' },
     sector: { type: String, default: '' },
+    subsector: { type: String, default: '' },
+    subsectorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Subsector' },
     ruralJurisdiction: { type: String, default: '' }
   },
   media: [{
