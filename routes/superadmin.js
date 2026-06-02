@@ -43,11 +43,11 @@ function buildDepartmentJurisdiction(areaTypes, sectors, ruralJurisdictions) {
   const parts = [];
   if (types.includes('Urban')) {
     const s = Array.isArray(sectors) ? sectors.filter(Boolean) : [];
-    parts.push(`Urban: ${s.join(', ')}`);
+    parts.push(`Urban: ${s.length ? s.join(', ') : 'All sectors'}`);
   }
   if (types.includes('Rural')) {
     const r = Array.isArray(ruralJurisdictions) ? ruralJurisdictions.filter(Boolean) : [];
-    parts.push(`Rural: ${r.join(', ')}`);
+    parts.push(`Rural: ${r.length ? r.join(', ') : 'All jurisdictions'}`);
   }
   return parts.join(' | ');
 }
@@ -56,7 +56,19 @@ function validateIslamabadLocationText(location, areaTypes, sectors, ruralJurisd
   const loc = String(location || '').trim();
   if (!loc) return { ok: false, message: 'Location is required' };
   const lower = loc.toLowerCase();
-  if (!lower.includes('islamabad')) return { ok: false, message: 'Department address must be within Islamabad' };
+  const sectorList = Array.isArray(sectors) ? sectors.map(s => String(s || '').trim().toLowerCase()).filter(Boolean) : [];
+  const ruralList = Array.isArray(ruralJurisdictions) ? ruralJurisdictions.map(s => String(s || '').trim().toLowerCase()).filter(Boolean) : [];
+  const mentionsCoverage = sectorList.some(s => lower.includes(s)) || ruralList.some(r => lower.includes(r));
+  const mentionsIslamabadMetro =
+    lower.includes('islamabad') ||
+    lower.includes('islamabad capital territory') ||
+    lower.includes('capital territory') ||
+    lower.includes('ict') ||
+    lower.includes('rawalpindi');
+  const mentionsPakistan = lower.includes('pakistan');
+  if (!mentionsIslamabadMetro && !mentionsCoverage && !mentionsPakistan) {
+    return { ok: false, message: 'Department address must be within Islamabad (include Islamabad/ICT/Rawalpindi, Pakistan, or your selected sector/jurisdiction)' };
+  }
 
   return { ok: true };
 }
@@ -93,8 +105,18 @@ router.put('/urban-sectors/:id', async (req, res) => {
 
 router.delete('/urban-sectors/:id', async (req, res) => {
   try {
-    await UrbanSector.findByIdAndDelete(req.params.id);
-    audit(req, 'delete', 'urbanSector', req.params.id, {});
+    const sectorId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(sectorId)) {
+      return res.status(400).json({ success: false, message: 'Invalid sector id' });
+    }
+    const subs = await Subsector.find({ sectorId }).select('_id');
+    const subsectorIds = (subs || []).map(s => s._id).filter(Boolean);
+    if (subsectorIds.length > 0) {
+      await SubsectorJurisdictionMapping.deleteMany({ subsectorId: { $in: subsectorIds } });
+      await Subsector.deleteMany({ sectorId });
+    }
+    await UrbanSector.findByIdAndDelete(sectorId);
+    audit(req, 'delete', 'urbanSector', sectorId, { deletedSubsectors: subsectorIds.length });
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to delete sector' });
@@ -105,6 +127,9 @@ router.delete('/urban-sectors/:id', async (req, res) => {
 router.get('/urban-sectors/:sectorId/subsectors', async (req, res) => {
   try {
     const { sectorId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(sectorId)) {
+      return res.status(400).json({ success: false, message: 'Invalid sectorId' });
+    }
     const list = await Subsector.find({ sectorId }).sort({ name: 1 });
     res.json({ success: true, subsectors: list });
   } catch (e) {
@@ -114,13 +139,23 @@ router.get('/urban-sectors/:sectorId/subsectors', async (req, res) => {
 
 router.post('/subsectors', async (req, res) => {
   try {
-    const { sectorId, name } = req.body || {};
-    if (!sectorId || !name) return res.status(400).json({ success: false, message: 'sectorId and name are required' });
-    const created = await Subsector.create({ sectorId, name: String(name).trim() });
-    audit(req, 'create', 'subsector', created._id, { sectorId, name });
-    res.status(201).json({ success: true, subsector: created });
+    const { name, sectorId, status } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ success: false, message: 'Subsector name is required' });
+    if (!sectorId || !mongoose.Types.ObjectId.isValid(sectorId)) return res.status(400).json({ success: false, message: 'Valid sectorId is required' });
+
+    const sector = await UrbanSector.findById(sectorId).select('_id name city');
+    if (!sector) return res.status(404).json({ success: false, message: 'Sector not found' });
+
+    const subsector = await Subsector.create({
+      name: String(name).trim(),
+      sectorId,
+      city: sector.city || 'Islamabad',
+      status: status === 'inactive' ? 'inactive' : 'active'
+    });
+    audit(req, 'create', 'subsector', subsector._id, { name: subsector.name, sectorId });
+    res.status(201).json({ success: true, subsector });
   } catch (e) {
-    if (e.code === 11000) return res.status(400).json({ success: false, message: 'Subsector already exists' });
+    if (e.code === 11000) return res.status(400).json({ success: false, message: 'Subsector already exists in this sector' });
     res.status(500).json({ success: false, message: 'Failed to create subsector' });
   }
 });
@@ -128,48 +163,67 @@ router.post('/subsectors', async (req, res) => {
 router.post('/urban-sectors/:sectorId/subsectors/auto-generate', async (req, res) => {
   try {
     const { sectorId } = req.params;
-    const sector = await UrbanSector.findById(sectorId).select('name');
-    if (!sector) return res.status(404).json({ success: false, message: 'Sector not found' });
-    const base = String(sector.name || '').trim();
-    if (!base) return res.status(400).json({ success: false, message: 'Invalid sector name' });
-
-    const docs = [1, 2, 3, 4].map(n => ({ sectorId, name: `${base}/${n}` }));
-    await Subsector.insertMany(docs, { ordered: false });
-    const list = await Subsector.find({ sectorId }).sort({ name: 1 });
-    audit(req, 'auto-generate', 'subsector', sectorId, { base, count: 4 });
-    res.json({ success: true, subsectors: list });
-  } catch (e) {
-    if (e && (e.code === 11000 || e.writeErrors)) {
-      const { sectorId } = req.params;
-      const list = await Subsector.find({ sectorId }).sort({ name: 1 });
-      return res.json({ success: true, subsectors: list });
+    if (!mongoose.Types.ObjectId.isValid(sectorId)) {
+      return res.status(400).json({ success: false, message: 'Invalid sectorId' });
     }
+
+    const sector = await UrbanSector.findById(sectorId).select('_id name city');
+    if (!sector) return res.status(404).json({ success: false, message: 'Sector not found' });
+
+    const base = String(sector.name || '').trim();
+    if (!base) return res.status(400).json({ success: false, message: 'Sector name is required to generate subsectors' });
+
+    const toCreate = [1, 2, 3, 4].map(n => ({
+      name: `${base}/${n}`,
+      sectorId: sector._id,
+      city: sector.city || 'Islamabad',
+      status: 'active'
+    }));
+
+    let insertedCount = 0;
+    try {
+      const inserted = await Subsector.insertMany(toCreate, { ordered: false });
+      insertedCount = Array.isArray(inserted) ? inserted.length : 0;
+    } catch (e) {
+      const writeErrors = Array.isArray(e?.writeErrors) ? e.writeErrors : [];
+      insertedCount = Math.max(0, toCreate.length - writeErrors.length);
+    }
+
+    audit(req, 'create', 'subsector:auto-generate', sectorId, { sectorName: base, created: insertedCount });
+    const list = await Subsector.find({ sectorId }).sort({ name: 1 });
+    res.json({ success: true, created: insertedCount, subsectors: list });
+  } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to auto-generate subsectors' });
   }
 });
 
 router.put('/subsectors/:id', async (req, res) => {
   try {
+    const id = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
     const { name, status } = req.body || {};
-    const update = {};
-    if (typeof name === 'string') update.name = String(name).trim();
-    if (typeof status === 'string') update.status = status;
-    update.updatedAt = new Date();
-    const subsector = await Subsector.findByIdAndUpdate(req.params.id, update, { new: true });
+    const updates = {};
+    if (typeof name === 'string' && name.trim()) updates.name = name.trim();
+    if (status === 'active' || status === 'inactive') updates.status = status;
+    if (Object.keys(updates).length === 0) return res.status(400).json({ success: false, message: 'No updates provided' });
+
+    const subsector = await Subsector.findByIdAndUpdate(id, updates, { new: true });
     if (!subsector) return res.status(404).json({ success: false, message: 'Subsector not found' });
-    audit(req, 'update', 'subsector', subsector._id, update);
+    audit(req, 'update', 'subsector', id, updates);
     res.json({ success: true, subsector });
   } catch (e) {
-    if (e.code === 11000) return res.status(400).json({ success: false, message: 'Subsector already exists' });
+    if (e.code === 11000) return res.status(400).json({ success: false, message: 'Subsector already exists in this sector' });
     res.status(500).json({ success: false, message: 'Failed to update subsector' });
   }
 });
 
 router.delete('/subsectors/:id', async (req, res) => {
   try {
-    await Subsector.findByIdAndDelete(req.params.id);
-    await SubsectorJurisdictionMapping.findOneAndDelete({ subsectorId: req.params.id });
-    audit(req, 'delete', 'subsector', req.params.id, {});
+    const id = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+    await SubsectorJurisdictionMapping.findOneAndDelete({ subsectorId: id });
+    await Subsector.findByIdAndDelete(id);
+    audit(req, 'delete', 'subsector', id, {});
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to delete subsector' });
@@ -179,8 +233,10 @@ router.delete('/subsectors/:id', async (req, res) => {
 // Subsector ↔ Department mapping
 router.get('/subsectors/:id/jurisdictions', async (req, res) => {
   try {
-    const mapping = await SubsectorJurisdictionMapping.findOne({ subsectorId: req.params.id }).lean();
-    res.json({ success: true, mapping: mapping || { subsectorId: req.params.id, departmentIds: [] } });
+    const id = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+    const mapping = await SubsectorJurisdictionMapping.findOne({ subsectorId: id }).select('subsectorId departmentIds');
+    res.json({ success: true, mapping: mapping || { subsectorId: id, departmentIds: [] } });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to get mapping' });
   }
@@ -188,14 +244,22 @@ router.get('/subsectors/:id/jurisdictions', async (req, res) => {
 
 router.put('/subsectors/:id/jurisdictions', async (req, res) => {
   try {
-    const { departmentIds } = req.body || {};
-    const list = Array.isArray(departmentIds) ? departmentIds : [];
+    const id = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
+    const raw = Array.isArray(req.body?.departmentIds) ? req.body.departmentIds : [];
+    const departmentIds = raw
+      .map(x => String(x || '').trim())
+      .filter(Boolean)
+      .filter(x => mongoose.Types.ObjectId.isValid(x))
+      .map(x => new mongoose.Types.ObjectId(x));
+
     const mapping = await SubsectorJurisdictionMapping.findOneAndUpdate(
-      { subsectorId: req.params.id },
-      { subsectorId: req.params.id, departmentIds: list, updatedAt: new Date() },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
-    audit(req, 'upsert', 'subsectorJurisdictionMapping', mapping._id, { subsectorId: req.params.id, departmentIds: list });
+      { subsectorId: id },
+      { subsectorId: id, departmentIds, updatedAt: new Date() },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).select('subsectorId departmentIds');
+
+    audit(req, 'update', 'subsectorJurisdictionMapping', id, { departmentIds: departmentIds.map(String) });
     res.json({ success: true, mapping });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to save mapping' });
@@ -363,36 +427,34 @@ router.post('/users/:role/:id/reset-password', async (req, res) => {
 // Departments CRUD
 router.post('/departments', async (req, res) => {
   try {
-    const { name, location, jurisdiction, servicesOffered, areaTypes, sectors, ruralJurisdictions } = req.body;
+    const { name, location, servicesOffered, areaTypes, sectors, ruralJurisdictions, addressValidated } = req.body;
     
     if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
     if (!Array.isArray(areaTypes) || areaTypes.length === 0) {
       return res.status(400).json({ success: false, message: 'Operational area type is required' });
     }
-    if (areaTypes.includes('Urban') && (!Array.isArray(sectors) || sectors.length === 0)) {
-      return res.status(400).json({ success: false, message: 'Select at least one Urban sector' });
-    }
-    if (areaTypes.includes('Rural') && (!Array.isArray(ruralJurisdictions) || ruralJurisdictions.length === 0)) {
-      return res.status(400).json({ success: false, message: 'Select at least one Rural jurisdiction' });
-    }
+    const nextSectors = areaTypes.includes('Urban') ? (Array.isArray(sectors) ? sectors : []) : [];
+    const nextRuralJurisdictions = areaTypes.includes('Rural') ? (Array.isArray(ruralJurisdictions) ? ruralJurisdictions : []) : [];
 
     // Validation
-    if (areaTypes && areaTypes.includes('Urban') && sectors && sectors.length > 0) {
-        const sectorCount = await UrbanSector.countDocuments({ name: { $in: sectors } });
+    if (areaTypes && areaTypes.includes('Urban') && nextSectors.length > 0) {
+        const sectorCount = await UrbanSector.countDocuments({ name: { $in: nextSectors } });
         if (sectorCount !== sectors.length) {
              return res.status(400).json({ success: false, message: 'One or more invalid Urban Sectors provided.' });
         }
     }
-    if (areaTypes && areaTypes.includes('Rural') && ruralJurisdictions && ruralJurisdictions.length > 0) {
-        const jurisdictionCount = await RuralJurisdiction.countDocuments({ name: { $in: ruralJurisdictions } });
+    if (areaTypes && areaTypes.includes('Rural') && nextRuralJurisdictions.length > 0) {
+        const jurisdictionCount = await RuralJurisdiction.countDocuments({ name: { $in: nextRuralJurisdictions } });
         if (jurisdictionCount !== ruralJurisdictions.length) {
              return res.status(400).json({ success: false, message: 'One or more invalid Rural Jurisdictions provided.' });
         }
     }
 
-    const locCheck = validateIslamabadLocationText(location, areaTypes, sectors, ruralJurisdictions);
-    if (!locCheck.ok) return res.status(400).json({ success: false, message: locCheck.message });
-    const computedJurisdiction = buildDepartmentJurisdiction(areaTypes, sectors, ruralJurisdictions);
+    if (addressValidated !== true) {
+      const locCheck = validateIslamabadLocationText(location, areaTypes, nextSectors, nextRuralJurisdictions);
+      if (!locCheck.ok) return res.status(400).json({ success: false, message: locCheck.message });
+    }
+    const computedJurisdiction = buildDepartmentJurisdiction(areaTypes, nextSectors, nextRuralJurisdictions);
 
     const dep = await Department.create({ 
       name, 
@@ -400,8 +462,8 @@ router.post('/departments', async (req, res) => {
       jurisdiction: computedJurisdiction,
       servicesOffered, 
       areaTypes: areaTypes || ['Urban'],
-      sectors: (areaTypes && areaTypes.includes('Urban')) ? sectors : [],
-      ruralJurisdictions: (areaTypes && areaTypes.includes('Rural')) ? ruralJurisdictions : []
+      sectors: nextSectors,
+      ruralJurisdictions: nextRuralJurisdictions
     });
     audit(req, 'create', 'department', dep._id, { name, areaTypes });
     res.status(201).json({ success: true, department: dep });
@@ -430,12 +492,6 @@ router.put('/departments/:id', async (req, res) => {
     if (!Array.isArray(nextAreaTypes) || nextAreaTypes.length === 0) {
       return res.status(400).json({ success: false, message: 'Operational area type is required' });
     }
-    if (nextAreaTypes.includes('Urban') && (!Array.isArray(nextSectors) || nextSectors.length === 0)) {
-      return res.status(400).json({ success: false, message: 'Select at least one Urban sector' });
-    }
-    if (nextAreaTypes.includes('Rural') && (!Array.isArray(nextRuralJurisdictions) || nextRuralJurisdictions.length === 0)) {
-      return res.status(400).json({ success: false, message: 'Select at least one Rural jurisdiction' });
-    }
 
     if (nextAreaTypes.includes('Urban') && nextSectors.length > 0) {
       const sectorCount = await UrbanSector.countDocuments({ name: { $in: nextSectors } });
@@ -450,12 +506,15 @@ router.put('/departments/:id', async (req, res) => {
       }
     }
 
-    const locCheck = validateIslamabadLocationText(nextLocation, nextAreaTypes, nextSectors, nextRuralJurisdictions);
-    if (!locCheck.ok) return res.status(400).json({ success: false, message: locCheck.message });
+    if (updates.addressValidated !== true) {
+      const locCheck = validateIslamabadLocationText(nextLocation, nextAreaTypes, nextSectors, nextRuralJurisdictions);
+      if (!locCheck.ok) return res.status(400).json({ success: false, message: locCheck.message });
+    }
     const computedJurisdiction = buildDepartmentJurisdiction(nextAreaTypes, nextSectors, nextRuralJurisdictions);
 
+    const { addressValidated, ...restUpdates } = updates || {};
     const computedUpdates = {
-      ...updates,
+      ...restUpdates,
       location: nextLocation,
       areaTypes: nextAreaTypes,
       sectors: nextSectors,
@@ -468,6 +527,24 @@ router.put('/departments/:id', async (req, res) => {
     res.json({ success: true, department: dep });
   } catch (e) {
     res.status(500).json({ success: false, message: 'Failed to update department' });
+  }
+});
+
+router.delete('/departments/:id', async (req, res) => {
+  try {
+    const dep = await Department.findById(req.params.id);
+    if (!dep) return res.status(404).json({ success: false, message: 'Department not found' });
+
+    await Department.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+    await DepartmentAdmin.updateMany({ departmentId: dep._id }, { $unset: { departmentId: '' } });
+    await SubsectorJurisdictionMapping.updateMany({}, { $pull: { departmentIds: dep._id } });
+    await CategoryDepartmentMapping.deleteMany({ departmentId: dep._id });
+    await RoutingPolicy.updateMany({ 'action.departmentId': dep._id }, { $set: { enabled: false, 'action.departmentId': null } });
+
+    audit(req, 'delete', 'department', req.params.id, { isActive: false });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, message: 'Failed to delete department' });
   }
 });
 

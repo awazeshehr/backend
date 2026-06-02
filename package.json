@@ -1,6 +1,6 @@
 {
   "name": "awaz-e-shehr-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Backend for Awaz e Shehr",
   "main": "server.js",
   "scripts": {
